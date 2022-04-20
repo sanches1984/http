@@ -1,10 +1,13 @@
-package middleware
+package server
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/urfave/negroni"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 )
 
 var (
@@ -16,11 +19,33 @@ var (
 	ResponseTime *prometheus.HistogramVec
 )
 
-func NewMetricsMiddleware() func(next http.Handler) http.Handler {
-	// todo
+func newMetricsMiddleware(prefix string) func(next http.Handler) http.Handler {
+	addBasicCollector(prefix)
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			lrw := negroni.NewResponseWriter(w)
+
+			CountRequest.WithLabelValues(r.RequestURI, r.Method).Inc()
+
+			next.ServeHTTP(lrw, r)
+
+			if lrw.Status() >= 300 {
+				CountError.WithLabelValues(r.RequestURI, r.Method, strconv.Itoa(lrw.Status())).Inc()
+			}
+
+			ResponseTime.WithLabelValues(r.RequestURI, r.Method).Observe(time.Since(start).Seconds())
+		})
+	}
 }
 
-func AddBasicCollector(prefix string) {
+// Metrics prometheus metrics
+func Metrics() http.Handler {
+	reg.MustRegister(collectorList...)
+	return promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
+}
+
+func addBasicCollector(prefix string) {
 	prefix = strings.ReplaceAll(prefix, "-", "_")
 
 	CountError = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -31,13 +56,13 @@ func AddBasicCollector(prefix string) {
 	CountRequest = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: prefix + "_request_count",
 		Help: "The total request count",
-	}, []string{"handler", "method", "code"})
+	}, []string{"handler", "method"})
 
 	ResponseTime = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    prefix + "_response_time",
 		Help:    "Response time in seconds",
 		Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
-	}, []string{"handler", "method", "code"})
+	}, []string{"handler", "method"})
 
 	collectorList = append(collectorList,
 		prometheus.NewGoCollector(),
@@ -45,14 +70,4 @@ func AddBasicCollector(prefix string) {
 		CountRequest,
 		ResponseTime,
 	)
-}
-
-func AddCollector(collector ...prometheus.Collector) {
-	collectorList = append(collectorList, collector...)
-}
-
-// Metrics prometheus metrics
-func Metrics() http.Handler {
-	reg.MustRegister(collectorList...)
-	return promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
 }

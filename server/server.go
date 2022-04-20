@@ -3,122 +3,106 @@ package server
 import (
 	"context"
 	"github.com/gorilla/mux"
-	"github.com/joho/godotenv"
-	"github.com/kelseyhightower/envconfig"
-	"github.com/opentracing-contrib/go-stdlib/nethttp"
-	"github.com/opentracing/opentracing-go"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
-	"github.com/sanches1984/gopkg-logger"
-	"github.com/sanches1984/http/server/middleware"
-	"github.com/urfave/negroni"
+	log "github.com/sanches1984/gopkg-logger"
 	"net/http"
 	"net/http/pprof"
-	"strconv"
 	"time"
 )
 
-type Server struct {
-	Router                 *mux.Router
-	MiddlewaresHttpHandler []middleware.HttpMiddleware
-	Middlewares            *negroni.Negroni
-	logger                 zerolog.Logger
-	srv                    *http.Server
+const (
+	defaultGracefulDelay   = 3 * time.Second
+	defaultGracefulTimeout = 5 * time.Second
+	defaultHTTPTimeout     = 20 * time.Second
+)
+
+type HTTPServer interface {
+	HandleFunc(path string, handleFunc func(http.ResponseWriter, *http.Request)) *mux.Route
+	Handle(path string, handler http.Handler) *mux.Route
+	Start(ctx context.Context) error
 }
 
-func init() {
-	logger := log.For("http-server")
-	if err := godotenv.Load(); err != nil {
-		logger.Error().Err(err).Msg("missing envs")
-	}
-	if err := envconfig.Process("", &specs); err != nil {
-		logger.Error().Err(err).Msg("can't read envs")
-	}
+type server struct {
+	srv         *http.Server
+	router      *mux.Router
+	middlewares []Middleware
+
+	appName         string
+	gracefulDelay   time.Duration
+	gracefulTimeout time.Duration
+	logger          zerolog.Logger
+	isLoggerSet     bool
+	showSwagger     bool
 }
 
-func NewServer() *Server {
-	router := mux.NewRouter()
-
-	mw := negroni.New()
-	mw.Use(negroni.HandlerFunc(middleware.RequestMetadataMiddleware))
-	mw.Use(negroni.HandlerFunc(middleware.LogMiddleware))
-
-	srv := &http.Server{
-		Addr: specs.Host + ":" + strconv.Itoa(specs.Port),
+func NewServer(appName, addr string, options ...Option) HTTPServer {
+	srv := &server{
+		appName: appName,
+		router:  mux.NewRouter(),
+		srv: &http.Server{
+			Addr:              addr,
+			ReadTimeout:       defaultHTTPTimeout,
+			WriteTimeout:      defaultHTTPTimeout,
+			ReadHeaderTimeout: defaultHTTPTimeout,
+		},
+		middlewares:     make([]Middleware, 0, 2),
+		gracefulDelay:   defaultGracefulDelay,
+		gracefulTimeout: defaultGracefulTimeout,
+	}
+	for _, o := range options {
+		o(srv)
 	}
 
-	httpHandlerMiddlewares := make([]middleware.HttpMiddleware, 0, 2)
-	prometheusMiddleware := middleware.NewDefault()
-	httpHandlerMiddlewares = append(httpHandlerMiddlewares, prometheusMiddleware.Handler)
-
-	return &Server{Router: router,
-		Middlewares:            mw,
-		MiddlewaresHttpHandler: httpHandlerMiddlewares,
-		logger:                 log.For("http-server"),
-		srv:                    srv,
+	if !srv.isLoggerSet {
+		WithLogger(log.For(appName))(srv)
 	}
+
+	srv.middlewares = append(srv.middlewares, newMetricsMiddleware(appName))
+	srv.middlewares = append(srv.middlewares, newRequestIdMiddleware())
+	return srv
 }
 
-func middlewareOptions() (options []nethttp.MWOption) {
-	opt := nethttp.OperationNameFunc(func(r *http.Request) string {
-		return r.Method + " " + r.URL.Path
-	})
-	options = append(options, opt)
-	return options
-}
-
-func (s *Server) HandleFunc(path string, handleFunc func(http.ResponseWriter, *http.Request)) *mux.Route {
+func (s *server) HandleFunc(path string, handleFunc func(http.ResponseWriter, *http.Request)) *mux.Route {
 	handler := http.HandlerFunc(handleFunc)
-
 	return s.Handle(path, handler)
 }
-func (s *Server) Handle(path string, handler http.Handler) *mux.Route {
-	wrappedHandler := handler
 
-	for _, mw := range s.MiddlewaresHttpHandler {
-		wrappedHandler = mw(path, wrappedHandler)
+func (s *server) Handle(path string, handler http.Handler) *mux.Route {
+	wrappedHandler := handler
+	for _, mw := range s.middlewares {
+		wrappedHandler = mw(wrappedHandler)
 	}
 
-	return s.Router.HandleFunc(path, wrappedHandler.ServeHTTP)
+	return s.router.HandleFunc(path, wrappedHandler.ServeHTTP)
 }
 
-func (s *Server) Server() *http.Server {
-	return s.srv
-}
-
-func (s *Server) SetAddr(host string, port int) {
-	s.srv.Addr = host + ":" + strconv.Itoa(port)
-}
-
-func (s *Server) Start(ctx context.Context) error {
-	s.Router.HandleFunc("/health", s.handlerHealth)
-	s.Router.HandleFunc("/metrics", promhttp.Handler().ServeHTTP)
-	s.Router.HandleFunc("/openapi.json", s.handlerOpenAPI)
+func (s *server) Start(ctx context.Context) error {
+	if s.showSwagger {
+		s.router.HandleFunc("/openapi.json", s.handlerOpenAPI)
+	}
+	s.router.HandleFunc("/health", s.handlerHealth)
+	s.router.Handle("/metrics", Metrics())
 
 	// pprof
-	s.Router.HandleFunc("/debug/pprof/", pprof.Index)
-	s.Router.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	s.Router.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	s.Router.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	s.Router.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	s.Router.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
-	s.Router.Handle("/debug/pprof/heap", pprof.Handler("heap"))
-	s.Router.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
-	s.Router.Handle("/debug/pprof/block", pprof.Handler("block"))
+	s.router.HandleFunc("/debug/pprof/", pprof.Index)
+	s.router.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	s.router.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	s.router.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	s.router.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	s.router.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+	s.router.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+	s.router.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
+	s.router.Handle("/debug/pprof/block", pprof.Handler("block"))
 
-	http.Handle("/", s.Router)
-
-	s.Middlewares.UseHandler(nethttp.Middleware(opentracing.GlobalTracer(), sentry.Recoverer(http.DefaultServeMux), middlewareOptions()...))
-
-	s.srv.Handler = s.Middlewares
+	http.Handle("/", s.router)
 
 	go func() {
 		<-ctx.Done()
 
-		ctx, cancel := context.WithTimeout(context.Background(), specs.GracefulTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), s.gracefulTimeout)
 		defer cancel()
 
-		time.Sleep(specs.GracefulDelay)
+		time.Sleep(s.gracefulDelay)
 		s.srv.SetKeepAlivesEnabled(false)
 
 		s.logger.Info().Msg("http-server is shutting down...")
@@ -130,17 +114,17 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 	s.printRoutes()
 
-	s.logger.Info().Str("addr", s.srv.Addr).Msgf("start http-server at %s", s.srv.Addr)
+	s.logger.Info().Str("addr", s.srv.Addr).Msg("start http-server")
 	return s.srv.ListenAndServe()
 }
 
-func (s *Server) printRoutes() {
-	err := s.Router.Walk(func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
+func (s *server) printRoutes() {
+	err := s.router.Walk(func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
 		t, err := route.GetPathTemplate()
 		if err != nil {
 			return err
 		}
-		s.logger.Info().Str("path", t).Msg("")
+		s.logger.Debug().Str("path", t).Msg("")
 		return nil
 	})
 	if err != nil {

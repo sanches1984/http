@@ -6,10 +6,6 @@ require (
 	github.com/go-chi/chi v1.5.4
 	github.com/go-chi/cors v1.2.0
 	github.com/gorilla/mux v1.8.0
-	github.com/joho/godotenv v1.4.0
-	github.com/kelseyhightower/envconfig v1.4.0
-	github.com/opentracing-contrib/go-stdlib v1.0.0
-	github.com/opentracing/opentracing-go v1.2.0
 	github.com/prometheus/client_golang v1.7.1
 	github.com/rs/zerolog v1.26.1
 	github.com/sanches1984/gopkg-logger v0.0.7

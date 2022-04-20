@@ -2,10 +2,10 @@ package server
 
 import "net/http"
 
-func (s *Server) handlerHealth(w http.ResponseWriter, _ *http.Request) {
+func (s *server) handlerHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func (s *Server) handlerOpenAPI(w http.ResponseWriter, r *http.Request) {
+func (s *server) handlerOpenAPI(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, "./openapi.json")
 }

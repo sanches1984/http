@@ -1,4 +1,4 @@
-package middleware
+package server
 
 import (
 	"context"
@@ -15,7 +15,7 @@ const requestIDHeaderName = "X-Request-Id"
 
 var prefix string
 
-func NewRequestIdMiddleware() func(next http.Handler) http.Handler {
+func newRequestIdMiddleware() func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		fn := func(w http.ResponseWriter, r *http.Request) {
 			if key, ok := r.Context().Value(mw.RequestIDKey).(string); ok {
