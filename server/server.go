@@ -3,8 +3,8 @@ package server
 import (
 	"context"
 	"github.com/gorilla/mux"
+	"github.com/opentracing/opentracing-go"
 	"github.com/rs/zerolog"
-	log "github.com/sanches1984/gopkg-logger"
 	"net/http"
 	"net/http/pprof"
 	"time"
@@ -13,7 +13,7 @@ import (
 const (
 	defaultGracefulDelay   = 3 * time.Second
 	defaultGracefulTimeout = 5 * time.Second
-	defaultHTTPTimeout     = 20 * time.Second
+	defaultHTTPTimeout     = 30 * time.Second
 )
 
 type HTTPServer interface {
@@ -26,16 +26,16 @@ type server struct {
 	srv         *http.Server
 	router      *mux.Router
 	middlewares []Middleware
+	closers     map[string]func() error
 
 	appName         string
 	gracefulDelay   time.Duration
 	gracefulTimeout time.Duration
 	logger          zerolog.Logger
-	isLoggerSet     bool
-	showSwagger     bool
+	tracer          opentracing.Tracer
 }
 
-func NewServer(appName, addr string, options ...Option) HTTPServer {
+func New(appName, addr string, options ...Option) HTTPServer {
 	srv := &server{
 		appName: appName,
 		router:  mux.NewRouter(),
@@ -46,6 +46,7 @@ func NewServer(appName, addr string, options ...Option) HTTPServer {
 			ReadHeaderTimeout: defaultHTTPTimeout,
 		},
 		middlewares:     make([]Middleware, 0, 2),
+		closers:         make(map[string]func() error, 1),
 		gracefulDelay:   defaultGracefulDelay,
 		gracefulTimeout: defaultGracefulTimeout,
 	}
@@ -53,10 +54,9 @@ func NewServer(appName, addr string, options ...Option) HTTPServer {
 		o(srv)
 	}
 
-	if !srv.isLoggerSet {
-		WithLogger(log.For(appName))(srv)
+	if srv.tracer != nil {
+		srv.middlewares = append(srv.middlewares, newTracingMiddleware(srv.tracer))
 	}
-
 	srv.middlewares = append(srv.middlewares, newMetricsMiddleware(appName))
 	srv.middlewares = append(srv.middlewares, newRequestIdMiddleware())
 	return srv
@@ -77,11 +77,12 @@ func (s *server) Handle(path string, handler http.Handler) *mux.Route {
 }
 
 func (s *server) Start(ctx context.Context) error {
-	if s.showSwagger {
-		s.router.HandleFunc("/openapi.json", s.handlerOpenAPI)
-	}
+	defer s.close()
+
+	// health & metrics
+	s.router.HandleFunc("/openapi.json", s.handlerOpenAPI)
 	s.router.HandleFunc("/health", s.handlerHealth)
-	s.router.Handle("/metrics", Metrics())
+	s.router.Handle("/metrics", handlerMetrics())
 
 	// pprof
 	s.router.HandleFunc("/debug/pprof/", pprof.Index)
@@ -116,6 +117,14 @@ func (s *server) Start(ctx context.Context) error {
 
 	s.logger.Info().Str("addr", s.srv.Addr).Msg("start http-server")
 	return s.srv.ListenAndServe()
+}
+
+func (s *server) close() {
+	for name, closer := range s.closers {
+		if err := closer(); err != nil {
+			s.logger.Warn().Err(err).Msgf("can't close %s", name)
+		}
+	}
 }
 
 func (s *server) printRoutes() {

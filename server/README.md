@@ -1,14 +1,14 @@
 # HTTP Server
---- NOT READY!!! ---
 
-Default HTTP server with:
+Simple HTTP server with:
+* Basic/Bearer authorization
 * prometheus metrics
-* logging
-* tracer 
+* logger
+* tracer
 * exposed profiler
-* exposed openapi.json
+* openapi.json
 
-# Example
+## Example
 
 ```go
 package main
@@ -17,23 +17,22 @@ import (
 	"context"
 	"github.com/sanches1984/http/server"
 	"io"
-	"log"
 	"net/http"
 )
 
 func main() {
-	srv := server.NewServer()
-	srv.HandleFunc("/hello", func(writer http.ResponseWriter, request *http.Request) {
-		_, err := io.WriteString(writer, "hello world")
+	srv := server.New("app", ":8080")
+	srv.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
+		_, err := io.WriteString(w, "hello world")
 		if err != nil {
-			writer.WriteHeader(http.StatusInternalServerError)
+			w.WriteHeader(http.StatusInternalServerError)
 		}
+		w.WriteHeader(http.StatusOK)
 	})
-
-	ctx := context.Background()
-	err := srv.Start(ctx)
+	
+	err := srv.Start(context.Background())
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 }
 ```

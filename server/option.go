@@ -2,6 +2,7 @@ package server
 
 import (
 	"github.com/rs/zerolog"
+	"net/http"
 	"time"
 )
 
@@ -28,16 +29,23 @@ func WithHTTPTimeout(timeout time.Duration) Option {
 	}
 }
 
-func WithSwaggerInfo() Option {
-	return func(s *server) {
-		s.showSwagger = true
-	}
-}
-
 func WithLogger(logger zerolog.Logger) Option {
 	return func(s *server) {
 		s.middlewares = append(s.middlewares, newLogMiddleware(logger))
 		s.logger = logger
-		s.isLoggerSet = true
+	}
+}
+
+func WithNotFoundHandler(handler http.Handler) Option {
+	return func(s *server) {
+		s.router.NotFoundHandler = handler
+	}
+}
+
+func WithTracer() Option {
+	return func(s *server) {
+		tracer, closer := initTracer(s.appName)
+		s.tracer = tracer
+		s.closers["tracer"] = closer.Close
 	}
 }

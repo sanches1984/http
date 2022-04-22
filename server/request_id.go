@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	mw "github.com/go-chi/chi/middleware"
-	"net/http"
 	"os"
 	"strings"
 )
@@ -14,18 +13,6 @@ import (
 const requestIDHeaderName = "X-Request-Id"
 
 var prefix string
-
-func newRequestIdMiddleware() func(next http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		fn := func(w http.ResponseWriter, r *http.Request) {
-			if key, ok := r.Context().Value(mw.RequestIDKey).(string); ok {
-				w.Header().Set(requestIDHeaderName, key)
-			}
-			next.ServeHTTP(w, r)
-		}
-		return mw.RequestID(http.HandlerFunc(fn))
-	}
-}
 
 func SetRequestId(ctx context.Context) context.Context {
 	id := mw.NextRequestID()
